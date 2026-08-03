@@ -13,7 +13,141 @@
         <MicaBackdrop />
     </Window.SystemBackdrop>
 
-    <Grid>
+    <Grid Padding="24" RowSpacing="18" RowDefinitions="Auto,Auto,*">
+        <Grid ColumnSpacing="12" ColumnDefinitions="*,Auto">
+            <StackPanel Spacing="4">
+                <TextBlock Text="Game Time Tracker"
+                           FontSize="28"
+                           FontWeight="SemiBold" />
+                <TextBlock x:Name="TrackingStatusText"
+                           Text="No games tracked"
+                           Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+            </StackPanel>
 
+            <ToggleSwitch x:Name="ShowSecondsToggle"
+                          Grid.Column="1"
+                          Header="Time format"
+                          OffContent="HH:MM"
+                          OnContent="HH:MM:SS"
+                          Toggled="ShowSecondsToggle_Toggled" />
+        </Grid>
+
+        <Grid Grid.Row="1"
+              ColumnSpacing="8"
+              ColumnDefinitions="*,Auto,Auto">
+            <TextBox x:Name="ExecutableInput"
+                     Header="Executable"
+                     PlaceholderText="ffxiv_dx11.exe or D:\Games\Game.exe"
+                     KeyDown="ExecutableInput_KeyDown" />
+
+            <Button x:Name="BrowseButton"
+                    Grid.Column="1"
+                    MinWidth="44"
+                    Margin="0,28,0,0"
+                    Click="BrowseButton_Click"
+                    ToolTipService.ToolTip="Browse">
+                <SymbolIcon Symbol="OpenFile" />
+            </Button>
+
+            <Button x:Name="AddButton"
+                    Grid.Column="2"
+                    Margin="0,28,0,0"
+                    Click="AddButton_Click">
+                <StackPanel Orientation="Horizontal" Spacing="8">
+                    <SymbolIcon Symbol="Add" />
+                    <TextBlock Text="Add" />
+                </StackPanel>
+            </Button>
+        </Grid>
+
+        <ListView x:Name="GamesList"
+                  Grid.Row="2"
+                  SelectionMode="None">
+            <ListView.ItemContainerTransitions>
+                <TransitionCollection />
+            </ListView.ItemContainerTransitions>
+            <ListView.ItemTemplate>
+                <DataTemplate>
+                    <Grid Padding="10"
+                          MinHeight="76"
+                          ColumnSpacing="12"
+                          ColumnDefinitions="48,*,Auto,Auto">
+                        <Border Width="48"
+                                Height="48"
+                                CornerRadius="8"
+                                Background="{ThemeResource CardBackgroundFillColorDefaultBrush}">
+                            <Image Source="{Binding IconSource}"
+                                   Width="36"
+                                   Height="36"
+                                   Stretch="Uniform" />
+                        </Border>
+
+                        <StackPanel Grid.Column="1"
+                                    VerticalAlignment="Center"
+                                    Spacing="2">
+                            <TextBlock Text="{Binding GameName}"
+                                       FontSize="16"
+                                       FontWeight="SemiBold" />
+                            <TextBlock Text="{Binding ExecutableLabel}"
+                                       Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                                       TextTrimming="CharacterEllipsis" />
+                        </StackPanel>
+
+                        <StackPanel Grid.Column="2"
+                                    VerticalAlignment="Center"
+                                    HorizontalAlignment="Right"
+                                    Orientation="Horizontal"
+                                    Spacing="28">
+                            <StackPanel Width="132"
+                                        Spacing="2">
+                                <TextBlock Text="Time Played Today"
+                                           FontSize="12"
+                                           Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                                           HorizontalAlignment="Right" />
+                                <TextBlock Text="{Binding TodayDisplayTime}"
+                                           FontSize="22"
+                                           FontWeight="SemiBold"
+                                           HorizontalAlignment="Right" />
+                            </StackPanel>
+
+                            <StackPanel Width="132"
+                                        Spacing="2">
+                                <TextBlock Text="Total Time Played"
+                                           FontSize="12"
+                                           Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                                           HorizontalAlignment="Right" />
+                                <TextBlock Text="{Binding TotalDisplayTime}"
+                                           FontSize="22"
+                                           FontWeight="SemiBold"
+                                           HorizontalAlignment="Right" />
+                            </StackPanel>
+
+                            <TextBlock Text="{Binding FocusStatus}"
+                                       VerticalAlignment="Bottom"
+                                       Foreground="{Binding FocusBrush}"
+                                       HorizontalAlignment="Right" />
+                        </StackPanel>
+
+                        <StackPanel Grid.Column="3"
+                                    Orientation="Horizontal"
+                                    VerticalAlignment="Center"
+                                    Spacing="4">
+                            <Button Tag="{Binding}"
+                                    MinWidth="36"
+                                    Click="ResetGame_Click"
+                                    ToolTipService.ToolTip="Reset all time">
+                                <SymbolIcon Symbol="Refresh" />
+                            </Button>
+                            <Button Tag="{Binding}"
+                                    MinWidth="36"
+                                    Click="RemoveGame_Click"
+                                    ToolTipService.ToolTip="Remove">
+                                <SymbolIcon Symbol="Delete" />
+                            </Button>
+                        </StackPanel>
+                    </Grid>
+                </DataTemplate>
+            </ListView.ItemTemplate>
+        </ListView>
     </Grid>
 </Window>
