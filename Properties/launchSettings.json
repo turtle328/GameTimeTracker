@@ -1,0 +1,10 @@
+{
+  "profiles": {
+    "GameTimeTracker (Package)": {
+      "commandName": "MsixPackage"
+    },
+    "GameTimeTracker (Unpackaged)": {
+      "commandName": "Project"
+    }
+  }
+}
