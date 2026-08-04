@@ -24,12 +24,27 @@
                            Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
             </StackPanel>
 
-            <ToggleSwitch x:Name="ShowSecondsToggle"
-                          Grid.Column="1"
-                          Header="Time format"
-                          OffContent="HH:MM"
-                          OnContent="HH:MM:SS"
-                          Toggled="ShowSecondsToggle_Toggled" />
+            <StackPanel Grid.Column="1"
+                        Orientation="Horizontal"
+                        Spacing="24">
+                <ToggleSwitch x:Name="StartWithWindowsToggle"
+                              Header="Startup"
+                              OffContent="Manual"
+                              OnContent="Windows"
+                              Toggled="StartWithWindowsToggle_Toggled" />
+
+                <ToggleSwitch x:Name="HideToTrayOnCloseToggle"
+                              Header="Close"
+                              OffContent="Exit"
+                              OnContent="Tray"
+                              Toggled="HideToTrayOnCloseToggle_Toggled" />
+
+                <ToggleSwitch x:Name="ShowSecondsToggle"
+                              Header="Time format"
+                              OffContent="HH:MM"
+                              OnContent="HH:MM:SS"
+                              Toggled="ShowSecondsToggle_Toggled" />
+            </StackPanel>
         </Grid>
 
         <Grid Grid.Row="1"

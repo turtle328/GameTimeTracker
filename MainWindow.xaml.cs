@@ -5,6 +5,7 @@ using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Input;
 using Microsoft.UI.Xaml.Media;
 using Microsoft.UI.Xaml.Media.Imaging;
+using Microsoft.Win32;
 using System;
 using System.Collections.ObjectModel;
 using System.ComponentModel;
@@ -18,20 +19,43 @@ using Windows.Storage.FileProperties;
 using Windows.Storage.Pickers;
 using Windows.System;
 using WinRT.Interop;
+using Drawing = System.Drawing;
+using WinForms = System.Windows.Forms;
 
 namespace GameTimeTracker
 {
     public sealed partial class MainWindow : Window
     {
+        private const int ShowWindowCommandHide = 0;
+        private const int ShowWindowCommandShow = 5;
+        private const string StartupArgument = "--minimized";
+        private const string StartupTaskId = "GameTimeTrackerStartup";
+        private const string StartupShortcutFileName = "GameTimeTracker.lnk";
+        private const string StartupRegistryKeyPath = @"Software\Microsoft\Windows\CurrentVersion\Run";
+        private const string StartupRegistryValueName = "GameTimeTracker";
+
         private static readonly JsonSerializerOptions CacheJsonOptions = new() { WriteIndented = true };
         private static readonly string CacheFilePath = Path.Combine(
             Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
             "GameTimeTracker",
             "tracked-games.json");
+        private static readonly string StartupShortcutPath = Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.Startup),
+            StartupShortcutFileName);
 
         private readonly DispatcherTimer _trackingTimer = new() { Interval = TimeSpan.FromSeconds(1) };
         private DateOnly _currentTrackingDate = DateOnly.FromDateTime(DateTime.Now);
+        private AppWindow? _appWindow;
+        private WinForms.NotifyIcon? _trayIcon;
+        private Drawing.Icon? _trayIconImage;
+        private IntPtr _windowHandle;
+        private bool _allowClose;
+        private bool _hideToTrayOnClose = true;
+        private bool _ownsTrayIconImage;
+        private bool _isUpdatingHideToTrayOnCloseToggle;
+        private bool _isUpdatingStartupToggle;
         private bool _isLoadingCache;
+        private bool _startMinimized;
         private bool _showSeconds;
         private DateTimeOffset _lastTimerTick = DateTimeOffset.Now;
 
@@ -40,7 +64,12 @@ namespace GameTimeTracker
         public MainWindow()
         {
             InitializeComponent();
+            _windowHandle = WindowNative.GetWindowHandle(this);
+            _startMinimized = ShouldStartMinimized();
             SetWindowIcon();
+            InitializeTrayIcon();
+            _ = InitializeStartupToggleAsync();
+            InitializeHideToTrayOnCloseToggle();
 
             GamesList.ItemsSource = TrackedGames;
             Closed += MainWindow_Closed;
@@ -49,17 +78,92 @@ namespace GameTimeTracker
             _ = InitializeTrackerAsync();
         }
 
+        public void ActivateForLaunch(bool wasStartedByStartupTask)
+        {
+            if (_startMinimized || wasStartedByStartupTask)
+            {
+                Activate();
+                HideToTray();
+                return;
+            }
+
+            ShowMainWindow();
+        }
+
         private void SetWindowIcon()
         {
-            string iconPath = Path.Combine(AppContext.BaseDirectory, "Assets", "AppIcon.ico");
+            WindowId windowId = Win32Interop.GetWindowIdFromWindow(_windowHandle);
+            _appWindow = AppWindow.GetFromWindowId(windowId);
+            _appWindow.Closing += AppWindow_Closing;
+
+            string iconPath = GetAppIconPath();
             if (!File.Exists(iconPath))
             {
                 return;
             }
 
-            WindowId windowId = Win32Interop.GetWindowIdFromWindow(WindowNative.GetWindowHandle(this));
-            AppWindow appWindow = AppWindow.GetFromWindowId(windowId);
-            appWindow.SetIcon(iconPath);
+            _appWindow.SetIcon(iconPath);
+        }
+
+        private void InitializeTrayIcon()
+        {
+            string iconPath = GetAppIconPath();
+            if (File.Exists(iconPath))
+            {
+                _trayIconImage = new Drawing.Icon(iconPath);
+                _ownsTrayIconImage = true;
+            }
+            else
+            {
+                _trayIconImage = Drawing.SystemIcons.Application;
+            }
+
+            WinForms.ContextMenuStrip menu = new();
+            _ = menu.Items.Add("Open GameTimeTracker", null, (_, _) => ShowMainWindowFromTray());
+            _ = menu.Items.Add("Exit", null, (_, _) => ExitApplicationFromTray());
+
+            _trayIcon = new WinForms.NotifyIcon
+            {
+                ContextMenuStrip = menu,
+                Icon = _trayIconImage,
+                Text = "Game Time Tracker",
+                Visible = true
+            };
+            _trayIcon.MouseClick += TrayIcon_MouseClick;
+        }
+
+        private async System.Threading.Tasks.Task InitializeStartupToggleAsync()
+        {
+            _isUpdatingStartupToggle = true;
+            StartWithWindowsToggle.IsEnabled = false;
+
+            try
+            {
+                DeleteLegacyStartupRegistryValue();
+                if (HasPackageIdentity())
+                {
+                    DeleteStartupShortcut();
+                }
+
+                StartWithWindowsToggle.IsOn = await IsRegisteredForStartupAsync();
+                StartWithWindowsToggle.IsEnabled = true;
+            }
+            catch (Exception ex)
+            {
+                StartWithWindowsToggle.IsOn = false;
+                TrackingStatusText.Text = $"Startup unavailable: {ex.Message}";
+            }
+            finally
+            {
+                _isUpdatingStartupToggle = false;
+            }
+        }
+
+        private void InitializeHideToTrayOnCloseToggle()
+        {
+            _isUpdatingHideToTrayOnCloseToggle = true;
+            HideToTrayOnCloseToggle.IsOn = _hideToTrayOnClose;
+            _isUpdatingHideToTrayOnCloseToggle = false;
         }
 
         private async System.Threading.Tasks.Task InitializeTrackerAsync()
@@ -73,6 +177,7 @@ namespace GameTimeTracker
         private void MainWindow_Closed(object sender, WindowEventArgs args)
         {
             SaveCache();
+            DisposeTrayIcon();
         }
 
         private async void AddButton_Click(object sender, RoutedEventArgs e)
@@ -126,24 +231,98 @@ namespace GameTimeTracker
             }
         }
 
-        private void ResetGame_Click(object sender, RoutedEventArgs e)
+        private async void StartWithWindowsToggle_Toggled(object sender, RoutedEventArgs e)
+        {
+            if (_isUpdatingStartupToggle)
+            {
+                return;
+            }
+
+            try
+            {
+                await SetStartupRegistrationAsync(StartWithWindowsToggle.IsOn);
+                TrackingStatusText.Text = StartWithWindowsToggle.IsOn
+                    ? "Startup tracking enabled"
+                    : "Startup tracking disabled";
+            }
+            catch (Exception ex)
+            {
+                _isUpdatingStartupToggle = true;
+                StartWithWindowsToggle.IsOn = await IsRegisteredForStartupAsync();
+                _isUpdatingStartupToggle = false;
+                TrackingStatusText.Text = $"Could not update startup: {ex.Message}";
+            }
+        }
+
+        private void HideToTrayOnCloseToggle_Toggled(object sender, RoutedEventArgs e)
+        {
+            if (_isUpdatingHideToTrayOnCloseToggle)
+            {
+                return;
+            }
+
+            _hideToTrayOnClose = HideToTrayOnCloseToggle.IsOn;
+            TrackingStatusText.Text = _hideToTrayOnClose
+                ? "Closing hides to tray"
+                : "Closing exits the app";
+            SaveCache();
+        }
+
+        private async void ResetGame_Click(object sender, RoutedEventArgs e)
         {
             if ((sender as FrameworkElement)?.Tag is TrackedGame game)
             {
+                bool confirmed = await ConfirmDestructiveActionAsync(
+                    "Reset tracked time?",
+                    $"Reset all tracked time for {game.GameName}? This clears both today's time and total time.",
+                    "Reset");
+                if (!confirmed)
+                {
+                    return;
+                }
+
                 game.ResetTime();
                 TrackingStatusText.Text = $"Reset {game.GameName}";
                 SaveCache();
             }
         }
 
-        private void RemoveGame_Click(object sender, RoutedEventArgs e)
+        private async void RemoveGame_Click(object sender, RoutedEventArgs e)
         {
             if ((sender as FrameworkElement)?.Tag is TrackedGame game)
             {
+                bool confirmed = await ConfirmDestructiveActionAsync(
+                    "Remove game?",
+                    $"Remove {game.GameName} from the tracker? Its tracked time will be deleted from the cache.",
+                    "Remove");
+                if (!confirmed)
+                {
+                    return;
+                }
+
                 TrackedGames.Remove(game);
                 RefreshWindowStatus();
                 SaveCache();
             }
+        }
+
+        private async System.Threading.Tasks.Task<bool> ConfirmDestructiveActionAsync(
+            string title,
+            string message,
+            string confirmText)
+        {
+            ContentDialog dialog = new()
+            {
+                Title = title,
+                Content = message,
+                PrimaryButtonText = confirmText,
+                CloseButtonText = "Cancel",
+                DefaultButton = ContentDialogButton.Close,
+                XamlRoot = ((FrameworkElement)Content).XamlRoot
+            };
+
+            ContentDialogResult result = await dialog.ShowAsync();
+            return result == ContentDialogResult.Primary;
         }
 
         private async System.Threading.Tasks.Task AddGameFromInputAsync()
@@ -378,6 +557,7 @@ namespace GameTimeTracker
             }
 
             RefreshWindowStatus(focusedGame);
+            UpdateTrayTooltip(focusedGame);
         }
 
         private bool ResetTodayIfNeeded(DateTimeOffset now)
@@ -417,6 +597,10 @@ namespace GameTimeTracker
 
                 _showSeconds = cache.ShowSeconds;
                 ShowSecondsToggle.IsOn = _showSeconds;
+                _hideToTrayOnClose = cache.HideToTrayOnClose;
+                _isUpdatingHideToTrayOnCloseToggle = true;
+                HideToTrayOnCloseToggle.IsOn = _hideToTrayOnClose;
+                _isUpdatingHideToTrayOnCloseToggle = false;
                 string todayDateKey = GetCacheDateKey(_currentTrackingDate);
 
                 foreach (TrackedGameCacheEntry entry in cache.Games)
@@ -470,6 +654,7 @@ namespace GameTimeTracker
 
                 TrackerCache cache = new()
                 {
+                    HideToTrayOnClose = _hideToTrayOnClose,
                     ShowSeconds = _showSeconds
                 };
                 string todayDateKey = GetCacheDateKey(_currentTrackingDate);
@@ -520,6 +705,302 @@ namespace GameTimeTracker
             }
         }
 
+        private void AppWindow_Closing(AppWindow sender, AppWindowClosingEventArgs args)
+        {
+            if (_allowClose)
+            {
+                return;
+            }
+
+            if (!_hideToTrayOnClose)
+            {
+                return;
+            }
+
+            args.Cancel = true;
+            HideToTray();
+        }
+
+        private void HideToTray()
+        {
+            SaveCache();
+            _ = ShowWindow(_windowHandle, ShowWindowCommandHide);
+            UpdateTrayTooltip();
+        }
+
+        private void ShowMainWindowFromTray()
+        {
+            _ = DispatcherQueue.TryEnqueue(ShowMainWindow);
+        }
+
+        private void ExitApplicationFromTray()
+        {
+            _ = DispatcherQueue.TryEnqueue(ExitApplication);
+        }
+
+        private void ShowMainWindow()
+        {
+            _ = ShowWindow(_windowHandle, ShowWindowCommandShow);
+            Activate();
+            _ = SetForegroundWindow(_windowHandle);
+        }
+
+        private void ExitApplication()
+        {
+            _allowClose = true;
+            SaveCache();
+            Close();
+        }
+
+        private void TrayIcon_MouseClick(object? sender, WinForms.MouseEventArgs e)
+        {
+            if (e.Button == WinForms.MouseButtons.Left)
+            {
+                ShowMainWindowFromTray();
+            }
+        }
+
+        private void UpdateTrayTooltip(TrackedGame? focusedGame = null)
+        {
+            if (_trayIcon is null)
+            {
+                return;
+            }
+
+            string text = focusedGame is null
+                ? "Game Time Tracker"
+                : $"Tracking {focusedGame.GameName}";
+
+            _trayIcon.Text = text.Length <= 63 ? text : text[..63];
+        }
+
+        private void DisposeTrayIcon()
+        {
+            if (_trayIcon is not null)
+            {
+                _trayIcon.Visible = false;
+                _trayIcon.MouseClick -= TrayIcon_MouseClick;
+                _trayIcon.Dispose();
+                _trayIcon = null;
+            }
+
+            if (_trayIconImage is not null && _ownsTrayIconImage)
+            {
+                _trayIconImage.Dispose();
+            }
+
+            _trayIconImage = null;
+            _ownsTrayIconImage = false;
+        }
+
+        private static bool ShouldStartMinimized()
+        {
+            foreach (string argument in Environment.GetCommandLineArgs())
+            {
+                if (string.Equals(argument, StartupArgument, StringComparison.OrdinalIgnoreCase))
+                {
+                    return true;
+                }
+            }
+
+            return false;
+        }
+
+        private static async System.Threading.Tasks.Task<bool> IsRegisteredForStartupAsync()
+        {
+            if (HasPackageIdentity())
+            {
+                Windows.ApplicationModel.StartupTask startupTask = await Windows.ApplicationModel.StartupTask.GetAsync(StartupTaskId);
+                return startupTask.State == Windows.ApplicationModel.StartupTaskState.Enabled;
+            }
+
+            return File.Exists(StartupShortcutPath);
+        }
+
+        private static async System.Threading.Tasks.Task SetStartupRegistrationAsync(bool shouldStartWithWindows)
+        {
+            if (!HasPackageIdentity())
+            {
+                if (shouldStartWithWindows)
+                {
+                    CreateStartupShortcut(GetCurrentExecutablePath());
+                }
+                else
+                {
+                    DeleteStartupShortcut();
+                }
+
+                DeleteLegacyStartupRegistryValue();
+                return;
+            }
+
+            Windows.ApplicationModel.StartupTask startupTask = await Windows.ApplicationModel.StartupTask.GetAsync(StartupTaskId);
+
+            if (!shouldStartWithWindows)
+            {
+                startupTask.Disable();
+                DeleteStartupShortcut();
+                DeleteLegacyStartupRegistryValue();
+                return;
+            }
+
+            Windows.ApplicationModel.StartupTaskState state = await startupTask.RequestEnableAsync();
+            if (state != Windows.ApplicationModel.StartupTaskState.Enabled)
+            {
+                throw new InvalidOperationException($"Windows returned startup state '{state}'.");
+            }
+
+            DeleteStartupShortcut();
+            DeleteLegacyStartupRegistryValue();
+        }
+
+        private static bool HasPackageIdentity()
+        {
+            try
+            {
+                _ = Windows.ApplicationModel.Package.Current.Id.FullName;
+                return true;
+            }
+            catch (Exception)
+            {
+                return false;
+            }
+        }
+
+        private static string GetCurrentExecutablePath()
+        {
+            string? executablePath = Environment.ProcessPath;
+            if (!string.IsNullOrWhiteSpace(executablePath) && File.Exists(executablePath))
+            {
+                return executablePath;
+            }
+
+            using Process currentProcess = Process.GetCurrentProcess();
+            executablePath = currentProcess.MainModule?.FileName;
+            if (!string.IsNullOrWhiteSpace(executablePath) && File.Exists(executablePath))
+            {
+                return executablePath;
+            }
+
+            throw new InvalidOperationException("Could not resolve the current executable path.");
+        }
+
+        private static void CreateStartupShortcut(string executablePath)
+        {
+            Directory.CreateDirectory(Path.GetDirectoryName(StartupShortcutPath)!);
+
+            Type? shellType = Type.GetTypeFromProgID("WScript.Shell");
+            if (shellType is null)
+            {
+                throw new InvalidOperationException("Windows Script Host is unavailable.");
+            }
+
+            object? shell = null;
+            object? shortcut = null;
+
+            try
+            {
+                shell = Activator.CreateInstance(shellType);
+                if (shell is null)
+                {
+                    throw new InvalidOperationException("Could not create the Windows shortcut shell.");
+                }
+
+                shortcut = shellType.InvokeMember(
+                    "CreateShortcut",
+                    System.Reflection.BindingFlags.InvokeMethod,
+                    binder: null,
+                    target: shell,
+                    args: [StartupShortcutPath]);
+
+                if (shortcut is null)
+                {
+                    throw new InvalidOperationException("Could not create the startup shortcut.");
+                }
+
+                Type shortcutType = shortcut.GetType();
+                shortcutType.InvokeMember(
+                    "TargetPath",
+                    System.Reflection.BindingFlags.SetProperty,
+                    binder: null,
+                    target: shortcut,
+                    args: [executablePath]);
+                shortcutType.InvokeMember(
+                    "Arguments",
+                    System.Reflection.BindingFlags.SetProperty,
+                    binder: null,
+                    target: shortcut,
+                    args: [StartupArgument]);
+                shortcutType.InvokeMember(
+                    "WorkingDirectory",
+                    System.Reflection.BindingFlags.SetProperty,
+                    binder: null,
+                    target: shortcut,
+                    args: [Path.GetDirectoryName(executablePath) ?? AppContext.BaseDirectory]);
+
+                string iconPath = GetAppIconPath();
+                if (File.Exists(iconPath))
+                {
+                    shortcutType.InvokeMember(
+                        "IconLocation",
+                        System.Reflection.BindingFlags.SetProperty,
+                        binder: null,
+                        target: shortcut,
+                        args: [$"{iconPath},0"]);
+                }
+
+                shortcutType.InvokeMember(
+                    "Save",
+                    System.Reflection.BindingFlags.InvokeMethod,
+                    binder: null,
+                    target: shortcut,
+                    args: null);
+            }
+            finally
+            {
+                ReleaseComObject(shortcut);
+                ReleaseComObject(shell);
+            }
+        }
+
+        private static void DeleteStartupShortcut()
+        {
+            try
+            {
+                File.Delete(StartupShortcutPath);
+            }
+            catch (Exception ex)
+            {
+                Debug.WriteLine($"Could not remove startup shortcut: {ex}");
+            }
+        }
+
+        private static void DeleteLegacyStartupRegistryValue()
+        {
+            try
+            {
+                using RegistryKey? key = Registry.CurrentUser.OpenSubKey(StartupRegistryKeyPath, writable: true);
+                key?.DeleteValue(StartupRegistryValueName, throwOnMissingValue: false);
+            }
+            catch (Exception ex)
+            {
+                Debug.WriteLine($"Could not remove legacy startup registry value: {ex}");
+            }
+        }
+
+        private static void ReleaseComObject(object? value)
+        {
+            if (value is not null && Marshal.IsComObject(value))
+            {
+                _ = Marshal.FinalReleaseComObject(value);
+            }
+        }
+
+        private static string GetAppIconPath()
+        {
+            return Path.Combine(AppContext.BaseDirectory, "Assets", "AppIcon.ico");
+        }
+
         private static ForegroundProcess? GetForegroundProcess()
         {
             IntPtr foregroundWindow = GetForegroundWindow();
@@ -564,6 +1045,12 @@ namespace GameTimeTracker
 
         [DllImport("user32.dll")]
         private static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint processId);
+
+        [DllImport("user32.dll")]
+        private static extern bool ShowWindow(IntPtr hWnd, int nCmdShow);
+
+        [DllImport("user32.dll")]
+        private static extern bool SetForegroundWindow(IntPtr hWnd);
     }
 
     public sealed class TrackedGame : INotifyPropertyChanged
@@ -727,6 +1214,8 @@ namespace GameTimeTracker
 
     public sealed class TrackerCache
     {
+        public bool HideToTrayOnClose { get; set; } = true;
+
         public bool ShowSeconds { get; set; }
 
         public Collection<TrackedGameCacheEntry> Games { get; set; } = [];
